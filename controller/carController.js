@@ -1,79 +1,56 @@
-const convertDbFieldsToSchema = require("../commonFunctions/commonFunctions");
+const commonFunc = require("../commonFunctions/commonFunctions");
 const db = require("../config/db");
 
 //  --- Search all active cars with optional search keyword and pagination. ---
-//
 exports.SearchAllCars = async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 10;
   const offset = (page - 1) * limit;
-  const search = req.query.search ? req.query.search.trim() : "";
+  const search = req.query.search?.trim() || "";
 
-  const gridFields = `
-    c.id,
-    b.name AS brand,
-    c.model,
-    c.accel_sec,
-    c.top_speed_kmh,
-    c.range_km,
-    c.segment,
-    c.price_euro
-  `;
+  let gridData;
+  try {
+    gridData = await commonFunc.getGridFields(db);
+  } catch {
+    return res.status(500).json({ error: "Could not load fields" });
+  }
 
-  // base query
-  let sql = `
-    SELECT ${gridFields}
-    FROM ElectricCars c
-    JOIN Brands b ON c.brand_id = b.id
-    WHERE c.active = TRUE
-  `;
+  const { fields, gridFields } = gridData;
 
-  // count
-  let countSql = `
-    SELECT COUNT(*) AS count
-    FROM ElectricCars c
-    JOIN Brands b ON c.brand_id = b.id
-    WHERE c.active = TRUE
-  `;
-
+  let sql = `SELECT ${gridFields} FROM cars c WHERE c.active = TRUE`;
+  let countSql = `SELECT COUNT(*) as count FROM cars c WHERE c.active = TRUE`;
   const params = [];
 
   if (search) {
-    const searchCondition = `
-      AND (
-        LOWER(CAST(c.id AS CHAR)) LIKE LOWER(CONCAT('%', ?, '%'))
-        OR LOWER(CAST(b.name AS CHAR)) LIKE LOWER(CONCAT('%', ?, '%'))
-        OR LOWER(CAST(c.model AS CHAR)) LIKE LOWER(CONCAT('%', ?, '%'))
-        OR LOWER(CAST(c.accel_sec AS CHAR)) LIKE LOWER(CONCAT('%', ?, '%'))
-        OR LOWER(CAST(c.top_speed_kmh AS CHAR)) LIKE LOWER(CONCAT('%', ?, '%'))
-        OR LOWER(CAST(c.range_km AS CHAR)) LIKE LOWER(CONCAT('%', ?, '%'))
-        OR LOWER(CAST(c.segment AS CHAR)) LIKE LOWER(CONCAT('%', ?, '%'))
-        OR LOWER(CAST(c.price_euro AS CHAR)) LIKE LOWER(CONCAT('%', ?, '%'))
-      )
-    `;
+    const searchParts = [
+      `LOWER(CAST(c.id AS CHAR)) LIKE LOWER(CONCAT('%', ?, '%'))`,
+    ];
 
-    sql += searchCondition;
-    countSql += searchCondition;
+    for (const field of fields) {
+      const col = field.column_name.trim();
+      searchParts.push(
+        `LOWER(CAST(c.${col} AS CHAR)) LIKE LOWER(CONCAT('%', ?, '%'))`
+      );
+    }
 
-    for (let i = 0; i < 8; i++) {
+    const searchClause = ` AND (${searchParts.join(" OR ")})`;
+    sql += searchClause;
+    countSql += searchClause;
+
+    for (let i = 0; i < fields.length + 1; i++) {
       params.push(search);
     }
   }
-
   sql += ` LIMIT ? OFFSET ?`;
   params.push(limit, offset);
 
   try {
-    const [rows, fields] = await db.query(sql, params);
-
-    const countParams = search ? params.slice(0, 8) : [];
+    const [rows] = await db.query(sql, params);
+    const countParams = params.slice(0, -2);
     const [[{ count }]] = await db.query(countSql, countParams);
-
-    let fieldConv = convertDbFieldsToSchema(fields);
 
     res.json({
       data: rows,
-      fields: fieldConv,
       pagination: {
         page,
         limit,
@@ -82,7 +59,7 @@ exports.SearchAllCars = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error(err);
+    console.error("Query error:", err);
     res.status(500).json({ error: "Failed to fetch cars" });
   }
 };
@@ -94,47 +71,26 @@ exports.filterCars = async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
   const offset = (page - 1) * limit;
 
-  const gridFields = `
-    c.id,
-    b.name AS brand,
-    c.model,
-    c.accel_sec,
-    c.top_speed_kmh,
-    c.range_km,
-    c.segment,
-    c.price_euro
-  `;
+  let gridData;
+  try {
+    gridData = await commonFunc.getGridFields(db);
+  } catch {
+    return res.status(500).json({ error: "Could not load grid fields" });
+  }
 
-  let sql = `
-    SELECT ${gridFields}
-    FROM ElectricCars c
-    JOIN Brands b ON c.brand_id = b.id
-    WHERE c.active = TRUE
-  `;
+  const { fields, gridFields } = gridData;
 
-  let countSql = `
-    SELECT COUNT(*) AS count
-    FROM ElectricCars c
-    JOIN Brands b ON c.brand_id = b.id
-    WHERE c.active = TRUE
-  `;
+  let sql = `SELECT ${gridFields} FROM cars c WHERE c.active = TRUE`;
+  let countSql = `SELECT COUNT(*) as count FROM cars c WHERE c.active = TRUE`;
 
   const params = [];
   const countParams = [];
-  function getCondition(filter) {
-    const colMap = {
-      brand: "b.name",
-      model: "c.model",
-      accel_sec: "c.accel_sec",
-      top_speed_kmh: "c.top_speed_kmh",
-      range_km: "c.range_km",
-      segment: "c.segment",
-      price_euro: "c.price_euro",
-      id: "c.id",
-    };
 
-    const col = colMap[filter.column];
-    if (!col) return null;
+  const allowedCols = new Set(fields.map((f) => f.column_name.trim()));
+
+  function getCondition(filter) {
+    const col = filter.column?.trim();
+    if (!allowedCols.has(col)) return null;
 
     const op = filter.operator.toLowerCase();
     const val = filter.value;
@@ -142,27 +98,27 @@ exports.filterCars = async (req, res) => {
     switch (op) {
       case "contains":
         return {
-          clause: `LOWER(${col}) LIKE LOWER(CONCAT('%', ?, '%'))`,
+          clause: `LOWER(c.${col}) LIKE LOWER(CONCAT('%', ?, '%'))`,
           param: val,
         };
       case "equals":
-        return { clause: `${col} = ?`, param: val };
+        return { clause: `c.${col} = ?`, param: val };
       case "starts with":
         return {
-          clause: `LOWER(${col}) LIKE LOWER(CONCAT(?, '%'))`,
+          clause: `LOWER(c.${col}) LIKE LOWER(CONCAT(?, '%'))`,
           param: val,
         };
       case "ends with":
         return {
-          clause: `LOWER(${col}) LIKE LOWER(CONCAT('%', ?))`,
+          clause: `LOWER(c.${col}) LIKE LOWER(CONCAT('%', ?))`,
           param: val,
         };
       case "is empty":
-        return { clause: `(${col} IS NULL OR ${col} = '')`, param: null };
+        return { clause: `(c.${col} IS NULL OR c.${col} = '')`, param: null };
       case "greater than":
-        return { clause: `${col} > ?`, param: val };
+        return { clause: `c.${col} > ?`, param: val };
       case "less than":
-        return { clause: `${col} < ?`, param: val };
+        return { clause: `c.${col} < ?`, param: val };
       default:
         return null;
     }
@@ -191,12 +147,12 @@ exports.filterCars = async (req, res) => {
   params.push(limit, offset);
 
   try {
-    const [rows, fields] = await db.query(sql, params);
+    const [rows, rawFields] = await db.query(sql, params);
     const [[{ count }]] = await db.query(countSql, countParams);
-    let fieldConv = convertDbFieldsToSchema(fields);
+
     res.json({
       data: rows,
-      fields: fieldConv,
+      fields: rawFields,
       pagination: {
         page,
         limit,
@@ -205,7 +161,7 @@ exports.filterCars = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error(err);
+    console.error("Filter query error:", err);
     res.status(500).json({ error: "Failed to fetch filtered cars" });
   }
 };
@@ -213,7 +169,6 @@ exports.filterCars = async (req, res) => {
 // --- Soft delete a car by setting its active field to FALSE. ---
 exports.softDeleteCar = async (req, res) => {
   const { id: carId } = req.body;
-  //console.log(carId);
 
   if (!carId) {
     return res
@@ -223,7 +178,7 @@ exports.softDeleteCar = async (req, res) => {
 
   try {
     const [result] = await db.query(
-      "UPDATE ElectricCars SET active = FALSE WHERE id = ?",
+      "UPDATE cars SET active = FALSE WHERE id = ?",
       [carId]
     );
 
@@ -240,8 +195,7 @@ exports.softDeleteCar = async (req, res) => {
   }
 };
 
-//   --- Search car by ID
-// Returns brand, performance, specs, and other key details if the car is active. ---
+// --- Search car by ID ---
 exports.getCarById = async (req, res) => {
   const carId = req.body.id;
 
@@ -249,45 +203,35 @@ exports.getCarById = async (req, res) => {
     return res.status(400).json({ error: "Car ID is required" });
   }
 
+  let selectedColumns;
+  try {
+    selectedColumns = await commonFunc.getCarColumns(db);
+  } catch {
+    return res.status(500).json({ error: "Could not load metadata columns" });
+  }
+
   try {
     const sql = `
-    SELECT 
-  b.name AS brand,
-  c.accel_sec,
-  c.body_style_id,
-  c.efficiency_whkm,
-  c.fast_charge_kmh,
-  DATE(c.launch_date) AS launch_date,
-  c.model,
-  c.plug_type_id,
-  c.powertrain_id,
-  c.price_euro,
-  c.range_km,
-  c.rapid_charge,
-  c.seats,
-  c.segment,
-  c.top_speed_kmh
-FROM ElectricCars c
-JOIN Brands b ON c.brand_id = b.id
-WHERE c.active = TRUE
-  AND c.id = ?
-
+      SELECT ${selectedColumns}
+      FROM cars c
+      WHERE c.active = TRUE AND c.id = ?
     `;
 
-    const [rows, fields] = await db.query(sql, [carId]);
+    const [rows] = await db.query(sql, [carId]);
 
     if (rows.length === 0) {
       return res.status(404).json({ error: "Car not found" });
     }
-    let car = rows[0];
-    if (car.launch_date) {
+
+    const car = rows[0];
+
+    if (car.launch_date && car.launch_date.toISOString) {
       car.launch_date = car.launch_date.toISOString().split("T")[0];
     }
-    let fieldConv = convertDbFieldsToSchema(fields);
 
-    res.json({ fieldConv, car });
+    res.json({ car });
   } catch (err) {
-    console.error(err);
+    console.error("Query error:", err);
     res.status(500).json({ error: "Failed to fetch car" });
   }
 };

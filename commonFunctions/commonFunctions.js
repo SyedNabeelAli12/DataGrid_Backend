@@ -1,35 +1,32 @@
-function convertDbFieldsToSchema(fields) {
-  const typeMap = {
-    0: 'number',   // DECIMAL
-    1: 'boolean',   // TINY
-    2: 'number',   // SHORT
-    3: 'number',   // LONG
-    4: 'number',   // FLOAT
-    5: 'number',   // DOUBLE
-    8: 'number',   // BIGINT
-    9: 'number',   // MEDIUMINT
-    10: 'string',  // DATE
-    11: 'string',  // TIME
-    12: 'string',  // DATETIME
-    13: 'string',  // YEAR
-    16: 'boolean', // BIT
-    246: 'number', // NEWDECIMAL
-    253: 'string', // VARCHAR, VARBINARY
-    254: 'string', // CHAR, BINARY
-    252: 'string'  // TEXT, BLOB
-  };
 
-  const schema = {};
-
-  for (const field of fields) {
-    // console.log(field.type)
-    const jsType = typeMap[field.type] || 'unknown';
-    schema[field.name] = jsType;
+async function getGridFields(db) {
+  try {
+    let gridFields = "c.id";
+    const sql = "SELECT * FROM grid_metadata";
+    const [rows] = await db.query(sql);
+    for (const row of rows) {
+      // const safeColumn = formatColumnName(row.column_name);
+      gridFields += `, c.${row.column_name.trim()}`;
+    }
+    return {fields:rows,gridFields};
+  } catch (err) {
+    console.error("Failed to get grid fields:", err);
+    throw err;
   }
-  console.log(schema)
+}
 
-  return schema;
+async function getCarColumns(db) {
+  try {
+    const sql = "SELECT column_name FROM table_metadata WHERE column_name NOT IN ('active', 'id')";
+    const [rows] = await db.query(sql);
+
+    const columns = rows.map(row => `c.${row.column_name.trim()}`).join(", ");
+    return columns || "c.id"; // fallback
+  } catch (err) {
+    console.error("Failed to load column names:", err);
+    throw err;
+  }
 }
 
 
-module.exports = convertDbFieldsToSchema
+module.exports = { getCarColumns,getGridFields}
